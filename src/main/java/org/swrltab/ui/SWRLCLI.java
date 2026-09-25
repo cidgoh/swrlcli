@@ -1943,6 +1943,11 @@ public class SWRLCLI {
     // --- ClassAtom C(?x) ---
     if (atom instanceof SWRLClassAtom) {
       OWLClassExpression ce = ((SWRLClassAtom) atom).getPredicate();
+      if (!isPredicateDeclared(ce, ontology)) {
+        r.note = "reference error: class '" + iriFragment(ce.toString()) + "' not declared in ontology";
+        r.referenceError = true;
+        return r;
+      }
       SWRLIArgument arg = ((SWRLClassAtom) atom).getArgument();
       IRI boundIRI = resolveIArg(arg, indBindings);
       if (boundIRI != null) {
@@ -1987,6 +1992,11 @@ public class SWRLCLI {
     if (atom instanceof SWRLObjectPropertyAtom) {
       SWRLObjectPropertyAtom pa = (SWRLObjectPropertyAtom) atom;
       OWLObjectPropertyExpression pe = pa.getPredicate();
+      if (!isPredicateDeclared(pe, ontology)) {
+        r.note = "reference error: property '" + iriFragment(pe.toString()) + "' not declared in ontology";
+        r.referenceError = true;
+        return r;
+      }
       IRI subjIRI = resolveIArg(pa.getFirstArgument(), indBindings);
       IRI objIRI  = resolveIArg(pa.getSecondArgument(), indBindings);
 
@@ -2071,6 +2081,11 @@ public class SWRLCLI {
     if (atom instanceof SWRLDataPropertyAtom) {
       SWRLDataPropertyAtom da = (SWRLDataPropertyAtom) atom;
       OWLDataPropertyExpression pe = da.getPredicate();
+      if (!isPredicateDeclared(pe, ontology)) {
+        r.note = "reference error: property '" + iriFragment(pe.toString()) + "' not declared in ontology";
+        r.referenceError = true;
+        return r;
+      }
       IRI subjIRI = resolveIArg(da.getFirstArgument(), indBindings);
       if (subjIRI != null) {
         if (!isIndividualDeclared(subjIRI, ontology)) {
@@ -2377,6 +2392,33 @@ public class SWRLCLI {
   private static boolean isIndividualDeclared(IRI iri, OWLOntology ontology) {
     for (OWLOntology ont : ontology.getImportsClosure())
       if (ont.containsIndividualInSignature(iri)) return true;
+    return false;
+  }
+
+  /** Returns true if {@code ce} (named class) is declared anywhere in the import closure. */
+  private static boolean isPredicateDeclared(OWLClassExpression ce, OWLOntology ontology) {
+    if (!(ce instanceof OWLClass)) return true; // complex expressions — skip check
+    IRI iri = ((OWLClass) ce).getIRI();
+    for (OWLOntology ont : ontology.getImportsClosure())
+      if (ont.containsClassInSignature(iri)) return true;
+    return false;
+  }
+
+  /** Returns true if {@code pe} (named object property) is declared anywhere in the import closure. */
+  private static boolean isPredicateDeclared(OWLObjectPropertyExpression pe, OWLOntology ontology) {
+    if (!(pe instanceof OWLObjectProperty)) return true; // inverse etc. — skip check
+    IRI iri = ((OWLObjectProperty) pe).getIRI();
+    for (OWLOntology ont : ontology.getImportsClosure())
+      if (ont.containsObjectPropertyInSignature(iri)) return true;
+    return false;
+  }
+
+  /** Returns true if {@code pe} (named data property) is declared anywhere in the import closure. */
+  private static boolean isPredicateDeclared(OWLDataPropertyExpression pe, OWLOntology ontology) {
+    if (!(pe instanceof OWLDataProperty)) return true;
+    IRI iri = ((OWLDataProperty) pe).getIRI();
+    for (OWLOntology ont : ontology.getImportsClosure())
+      if (ont.containsDataPropertyInSignature(iri)) return true;
     return false;
   }
 
@@ -2891,25 +2933,40 @@ public class SWRLCLI {
     if (msg != null) System.err.println("Error: " + msg);
     System.err.println("Usage: SWRLCLI [options] <ontology.owl>");
     System.err.println();
-    System.err.println("Query modes (run exactly one):");
-    System.err.println("  --query <name>          Run named SQWRL query already in the ontology");
-    System.err.println("  --query-text <sqwrl>    Run an inline SQWRL expression");
-    System.err.println("    --query-name <name>     Name to assign to the result set (default: cli-query)");
-    System.err.println("  --infer                 Fire all SWRL rules; print inferred axioms as OWL Functional Syntax");
-    System.err.println("  --rules <name[,name…]>  Fire one or more named SWRL rules; print inferred axioms as OWL Functional Syntax");
-    System.err.println("  --list-queries          Print SQWRL queries stored in the ontology");
-    System.err.println("  --list-rules            Print SWRL rules stored in the ontology");
+    System.err.println("Run modes (exactly one required):");
+    System.err.println("  --infer                   Fire all enabled SWRL rules; print inferred axioms");
+    System.err.println("  --rules <name[,name…]>    Fire one or more named SWRL rules");
+    System.err.println("  --rule-text <swrl>        Parse and fire an inline SWRL rule expression");
+    System.err.println("    --rule-text-name <name>   Name for the inline rule (default: cli-rule)");
+    System.err.println("  --query <name>            Run a named SQWRL query stored in the ontology");
+    System.err.println("  --query-text <sqwrl>      Parse and run an inline SQWRL expression");
+    System.err.println("    --query-name <name>       Name for the inline query (default: cli-query)");
+    System.err.println("  --list-rules              List SWRL rules stored in the ontology");
+    System.err.println("  --list-queries            List SQWRL queries stored in the ontology");
+    System.err.println("  --delete                  Delete named rule(s) given by --rules (use with --save to persist)");
+    System.err.println();
+    System.err.println("Input options:");
+    System.err.println("  --file <path>             Load additional SWRL rules from a .swrl file (repeatable)");
+    System.err.println("  --save                    Write rule additions/deletions back to the ontology file");
+    System.err.println("  --ignore-imports          Silently skip unresolvable owl:imports declarations");
+    System.err.println("  --config <path>           YAML config file for predicate colour styles (swrlcli_config.yaml)");
     System.err.println();
     System.err.println("Output options:");
-    System.err.println("  --format tsv|csv|markdown  Output format (default: tsv)");
-    System.err.println("                             markdown: table with rdfs:label substitution for --list-rules/--list-queries");
-    System.err.println("  --ignore-imports        Silently skip unresolvable owl:imports declarations");
-    System.err.println("  --debug                 With --rules: filter inferred axioms to those involving");
-    System.err.println("                          individuals matched by the first antecedent term");
-    System.err.println("  --constraint <atom>     Bind a variable for --rules debug evaluation.");
-    System.err.println("                          Format: Class(individual) or property(subject,object)");
-    System.err.println("                          Use prefix-qualified names (e.g. obo:DEMO_00011(recipe:r1.s2.x))");
-    System.err.println("                          Implies --debug. May be repeated.");
+    System.err.println("  --format tsv|csv|markdown|txt");
+    System.err.println("                            Output format (default: tsv)");
+    System.err.println("                            markdown: HTML table with rdfs:label substitution and colour spans");
+    System.err.println("                            txt: like markdown but no HTML — paste-safe for --file input");
+    System.err.println("  --no-color                Suppress HTML colour spans in markdown output");
+    System.err.println("  --output-file <path>      Write inferred ontology to file (--infer/--rules/--rule-text only)");
+    System.err.println("  --output-iri <iri>        Override ontology IRI written to --output-file");
+    System.err.println();
+    System.err.println("Debug/trace options:");
+    System.err.println("  --debug                   Show per-atom evaluation details for each rule body");
+    System.err.println("  --constraint <expr>       Pre-bind a rule variable; implies --debug. Repeatable.");
+    System.err.println("                            Format: predicate(individual) or predicate(subject,object)");
+    System.err.println("                            Accept prefix-qualified CURIEs or rdfs:label values:");
+    System.err.println("                            e.g.  obo:DEMO_00011(recipe:r1.s2.x)");
+    System.err.println("                            e.g.  'combining two materials'('add carrots to water')");
     System.exit(msg == null ? 0 : 1);
   }
 }
