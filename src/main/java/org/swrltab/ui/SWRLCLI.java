@@ -174,7 +174,7 @@ public class SWRLCLI {
       boolean queryMode = (queryName != null || queryText != null);
       boolean ruleMode = (!ruleNames.isEmpty() && !delete) || ruleText != null;
       if (!ruleMode && !queryMode) {
-        System.err.println("Warning: --constraint only applies to --rule, --rule-text, --query, or --query-text; ignoring.");
+        System.err.println("Warning: --constraint only applies to --rules, --rule-text, --query, or --query-text; ignoring.");
         constraints.clear();
       } else if (ruleMode) {
         debug = true; // --constraint implies --debug for rules
@@ -743,7 +743,7 @@ public class SWRLCLI {
       if (!targetRuleMap.containsKey(name)) {
         System.err.println("Error: no SWRL rule named '" + name + "'");
         if (queryNames.contains(name))
-          System.err.println("'" + name + "' is a SQWRL query — use --query instead of --rule.");
+          System.err.println("'" + name + "' is a SQWRL query — use --query instead of --rules.");
         else
           System.err.println("Use --list-rules to see available rule names. Perhaps this is a query, not a rule?");
         System.exit(1);
@@ -1836,10 +1836,14 @@ public class SWRLCLI {
       // Per-argument colours come from the predicate styles config when colorize is true.
       String display = formatAtomColored(atom, indBindings, litBindings, labels, colorize, config);
 
-      // Compute notes column: MATCHED > INVERSE ONLY > diagnostic note from evaluation
+      // Compute notes column: MATCHED > reference error (red) > INVERSE ONLY > diagnostic note
       String noteCell;
       if (matchedAtoms.contains(atom)) {
-        noteCell = "MATCHED";
+        noteCell = r.satisfied ? "MATCHED" : (md ? "*" + r.note + "*" : r.note);
+      } else if (r.referenceError) {
+        noteCell = md
+            ? "<span style=\"color:red\">" + r.note + "</span>"
+            : "[REF ERROR] " + r.note;
       } else if (!r.satisfied && !r.skip && atom instanceof SWRLObjectPropertyAtom
           && checkInverseOnly((SWRLObjectPropertyAtom) atom, indBindings, inverseMap, ontology, df)) {
         noteCell = "INVERSE ONLY";
@@ -1942,7 +1946,12 @@ public class SWRLCLI {
       SWRLIArgument arg = ((SWRLClassAtom) atom).getArgument();
       IRI boundIRI = resolveIArg(arg, indBindings);
       if (boundIRI != null) {
-        // Variable already bound — verify ClassAssertion exists
+        // Variable already bound — check it is a real individual, then verify ClassAssertion
+        if (!isIndividualDeclared(boundIRI, ontology)) {
+          r.note = "reference error: '" + iriFragment(boundIRI.toString()) + "' not found in ontology";
+          r.referenceError = true;
+          return r;
+        }
         OWLNamedIndividual ind = df.getOWLNamedIndividual(boundIRI);
         for (OWLOntology ont : ontology.getImportsClosure()) {
           for (OWLClassAssertionAxiom ax : ont.getClassAssertionAxioms(ind)) {
@@ -1982,7 +1991,15 @@ public class SWRLCLI {
       IRI objIRI  = resolveIArg(pa.getSecondArgument(), indBindings);
 
       if (subjIRI != null && objIRI != null) {
-        // Both bound — check exact assertion
+        // Both bound — check each is a real individual, then check exact assertion
+        if (!isIndividualDeclared(subjIRI, ontology)) {
+          r.note = "reference error: '" + iriFragment(subjIRI.toString()) + "' not found in ontology";
+          r.referenceError = true; return r;
+        }
+        if (!isIndividualDeclared(objIRI, ontology)) {
+          r.note = "reference error: '" + iriFragment(objIRI.toString()) + "' not found in ontology";
+          r.referenceError = true; return r;
+        }
         OWLNamedIndividual subj = df.getOWLNamedIndividual(subjIRI);
         OWLNamedIndividual obj  = df.getOWLNamedIndividual(objIRI);
         for (OWLOntology ont : ontology.getImportsClosure()) {
@@ -1995,7 +2012,11 @@ public class SWRLCLI {
         r.note = "no ObjectPropertyAssertion(" + iriFragment(pe.toString()) + ", "
             + iriFragment(subjIRI.toString()) + ", " + iriFragment(objIRI.toString()) + ")";
       } else if (subjIRI != null) {
-        // Subject bound, object unbound — find objects
+        // Subject bound, object unbound — check subject is real, then find objects
+        if (!isIndividualDeclared(subjIRI, ontology)) {
+          r.note = "reference error: '" + iriFragment(subjIRI.toString()) + "' not found in ontology";
+          r.referenceError = true; return r;
+        }
         OWLNamedIndividual subj = df.getOWLNamedIndividual(subjIRI);
         IRI objVar = unboundVar(pa.getSecondArgument(), indBindings, litBindings);
         List<OWLNamedIndividual> candidates = new ArrayList<>();
@@ -2014,7 +2035,11 @@ public class SWRLCLI {
           if (objVar != null) r.newIndBindings.put(objVar, candidates.get(0).getIRI());
         }
       } else if (objIRI != null) {
-        // Object bound, subject unbound — find subjects
+        // Object bound, subject unbound — check object is real, then find subjects
+        if (!isIndividualDeclared(objIRI, ontology)) {
+          r.note = "reference error: '" + iriFragment(objIRI.toString()) + "' not found in ontology";
+          r.referenceError = true; return r;
+        }
         OWLNamedIndividual obj = df.getOWLNamedIndividual(objIRI);
         IRI subjVar = unboundVar(pa.getFirstArgument(), indBindings, litBindings);
         List<OWLNamedIndividual> candidates = new ArrayList<>();
@@ -2048,6 +2073,10 @@ public class SWRLCLI {
       OWLDataPropertyExpression pe = da.getPredicate();
       IRI subjIRI = resolveIArg(da.getFirstArgument(), indBindings);
       if (subjIRI != null) {
+        if (!isIndividualDeclared(subjIRI, ontology)) {
+          r.note = "reference error: '" + iriFragment(subjIRI.toString()) + "' not found in ontology";
+          r.referenceError = true; return r;
+        }
         OWLNamedIndividual subj = df.getOWLNamedIndividual(subjIRI);
         IRI litVar = unboundVar(da.getSecondArgument(), indBindings, litBindings);
         OWLLiteral alreadyBound = (da.getSecondArgument() instanceof SWRLVariable)
@@ -2136,8 +2165,9 @@ public class SWRLCLI {
 
   /** Result of evaluating a single SWRL body atom. */
   private static class AtomResult {
-    boolean satisfied    = false;
-    boolean skip         = false;  // cannot evaluate (e.g. unsupported builtin)
+    boolean satisfied      = false;
+    boolean skip           = false;  // cannot evaluate (e.g. unsupported builtin)
+    boolean referenceError = false;  // bound IRI not declared as a NamedIndividual in ontology
     Map<IRI, IRI>        newIndBindings = new LinkedHashMap<>();
     Map<IRI, OWLLiteral> newLitBindings = new LinkedHashMap<>();
     int    candidateCount = 1;
@@ -2336,6 +2366,20 @@ public class SWRLCLI {
     return null;
   }
 
+  /** Returns the IRI whose rdfs:label exactly matches {@code label} (case-insensitive), or null. */
+  private static IRI resolveLabel(String label, Map<IRI, String> labels) {
+    for (Map.Entry<IRI, String> e : labels.entrySet())
+      if (label.equalsIgnoreCase(e.getValue())) return e.getKey();
+    return null;
+  }
+
+  /** Returns true if {@code iri} is declared as a NamedIndividual anywhere in the import closure. */
+  private static boolean isIndividualDeclared(IRI iri, OWLOntology ontology) {
+    for (OWLOntology ont : ontology.getImportsClosure())
+      if (ont.containsIndividualInSignature(iri)) return true;
+    return false;
+  }
+
   /**
    * Returns the predicate IRI for a SWRL body atom, or null for built-in atoms,
    * DifferentIndividuals atoms, and other non-predicate forms.
@@ -2383,10 +2427,20 @@ public class SWRLCLI {
       String   predicatePart = raw.substring(0, parenOpen).trim();
       String[] argTokens     = raw.substring(parenOpen + 1, parenClose).split(",", -1);
 
-      IRI predicateIRI = resolveIRI(predicatePart, prefixes);
+      // Strip optional surrounding quotes to allow label-style usage, e.g. 'combining two materials'
+      String cleanPredicate = predicatePart;
+      if (cleanPredicate.length() >= 2
+          && ((cleanPredicate.startsWith("'") && cleanPredicate.endsWith("'"))
+           || (cleanPredicate.startsWith("\"") && cleanPredicate.endsWith("\"")))) {
+        cleanPredicate = cleanPredicate.substring(1, cleanPredicate.length() - 1).trim();
+      }
+
+      IRI predicateIRI = resolveIRI(cleanPredicate, prefixes);
+      // Fall back to rdfs:label lookup when CURIE resolution yields nothing
+      if (predicateIRI == null) predicateIRI = resolveLabel(cleanPredicate, labels);
       if (predicateIRI == null) {
-        System.err.println("# ERROR: cannot resolve predicate '" + predicatePart
-            + "' — check prefix declarations");
+        System.err.println("# ERROR: cannot resolve predicate '" + cleanPredicate
+            + "' — check prefix declarations or rdfs:label");
         continue;
       }
 
@@ -2396,6 +2450,20 @@ public class SWRLCLI {
         if (predicateIRI.equals(atomPredicateIRI(candidate))) {
           matchedAtom = candidate;
           break;
+        }
+      }
+      // resolveIRI may have produced a default-namespace fake IRI that found no atom;
+      // retry with a label lookup before giving up
+      if (matchedAtom == null) {
+        IRI labelIRI = resolveLabel(cleanPredicate, labels);
+        if (labelIRI != null && !labelIRI.equals(predicateIRI)) {
+          predicateIRI = labelIRI;
+          for (SWRLAtom candidate : bodyAtoms) {
+            if (predicateIRI.equals(atomPredicateIRI(candidate))) {
+              matchedAtom = candidate;
+              break;
+            }
+          }
         }
       }
       if (matchedAtom == null) {
@@ -2411,14 +2479,14 @@ public class SWRLCLI {
       // Bind the atom's variable argument(s) to the supplied individual IRI(s)
       if (matchedAtom instanceof SWRLClassAtom) {
         bindConstraintVariable(((SWRLClassAtom) matchedAtom).getArgument(),
-            argTokens, 0, prefixes, bindings);
+            argTokens, 0, prefixes, labels, bindings);
       } else if (matchedAtom instanceof SWRLObjectPropertyAtom) {
         SWRLObjectPropertyAtom pAtom = (SWRLObjectPropertyAtom) matchedAtom;
-        bindConstraintVariable(pAtom.getFirstArgument(),  argTokens, 0, prefixes, bindings);
-        bindConstraintVariable(pAtom.getSecondArgument(), argTokens, 1, prefixes, bindings);
+        bindConstraintVariable(pAtom.getFirstArgument(),  argTokens, 0, prefixes, labels, bindings);
+        bindConstraintVariable(pAtom.getSecondArgument(), argTokens, 1, prefixes, labels, bindings);
       } else if (matchedAtom instanceof SWRLDataPropertyAtom) {
         bindConstraintVariable(((SWRLDataPropertyAtom) matchedAtom).getFirstArgument(),
-            argTokens, 0, prefixes, bindings);
+            argTokens, 0, prefixes, labels, bindings);
       }
     }
 
@@ -2428,16 +2496,19 @@ public class SWRLCLI {
   /**
    * If {@code arg} is a SWRL variable and {@code argTokens[argIdx]} resolves to an IRI,
    * records the binding in {@code bindings} and prints it on stderr.
+   * Falls back to rdfs:label lookup when CURIE resolution yields nothing.
    */
   private static void bindConstraintVariable(SWRLArgument arg, String[] argTokens, int argIdx,
-      Map<String, String> prefixes, Map<IRI, IRI> bindings) {
+      Map<String, String> prefixes, Map<IRI, String> labels, Map<IRI, IRI> bindings) {
     if (!(arg instanceof SWRLVariable)) return;
     if (argIdx >= argTokens.length) return;
     IRI varIRI = ((SWRLVariable) arg).getIRI();
-    IRI indIRI = resolveIRI(argTokens[argIdx].trim(), prefixes);
+    String token = argTokens[argIdx].trim();
+    IRI indIRI = resolveIRI(token, prefixes);
+    if (indIRI == null) indIRI = resolveLabel(token, labels);
     if (indIRI == null) {
-      System.err.println("# ERROR: cannot resolve argument '" + argTokens[argIdx].trim()
-          + "' — check prefix declarations");
+      System.err.println("# ERROR: cannot resolve argument '" + token
+          + "' — check prefix declarations or rdfs:label");
       return;
     }
     bindings.put(varIRI, indIRI);
@@ -2825,7 +2896,7 @@ public class SWRLCLI {
     System.err.println("  --query-text <sqwrl>    Run an inline SQWRL expression");
     System.err.println("    --query-name <name>     Name to assign to the result set (default: cli-query)");
     System.err.println("  --infer                 Fire all SWRL rules; print inferred axioms as OWL Functional Syntax");
-    System.err.println("  --rule <name>           Fire a single named SWRL rule; print inferred axioms as OWL Functional Syntax");
+    System.err.println("  --rules <name[,name…]>  Fire one or more named SWRL rules; print inferred axioms as OWL Functional Syntax");
     System.err.println("  --list-queries          Print SQWRL queries stored in the ontology");
     System.err.println("  --list-rules            Print SWRL rules stored in the ontology");
     System.err.println();
@@ -2833,9 +2904,9 @@ public class SWRLCLI {
     System.err.println("  --format tsv|csv|markdown  Output format (default: tsv)");
     System.err.println("                             markdown: table with rdfs:label substitution for --list-rules/--list-queries");
     System.err.println("  --ignore-imports        Silently skip unresolvable owl:imports declarations");
-    System.err.println("  --debug                 With --rule: filter inferred axioms to those involving");
+    System.err.println("  --debug                 With --rules: filter inferred axioms to those involving");
     System.err.println("                          individuals matched by the first antecedent term");
-    System.err.println("  --constraint <atom>     Bind a variable for --rule debug evaluation.");
+    System.err.println("  --constraint <atom>     Bind a variable for --rules debug evaluation.");
     System.err.println("                          Format: Class(individual) or property(subject,object)");
     System.err.println("                          Use prefix-qualified names (e.g. obo:DEMO_00011(recipe:r1.s2.x))");
     System.err.println("                          Implies --debug. May be repeated.");
