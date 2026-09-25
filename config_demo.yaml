@@ -1,0 +1,45 @@
+# swrlcli_config.yaml
+#
+# Place this file alongside your ontology (or pass it with --config <path>) to
+# override built-in colour defaults used in --format markdown output.
+# Only entries present here are changed; all other built-in defaults are kept.
+#
+# Note: two CSS rules are hardcoded and cannot be changed here:
+#   body, .markdown-body { max-width: 90%; }   (page-width cap in the <style> block)
+#   white-space: nowrap;                        (appended to every entity style span)
+
+# ---------------------------------------------------------------------------
+# entity_styles
+# ---------------------------------------------------------------------------
+# Maps an entity-type name to the CSS rule applied to <span> elements that
+# wrap argument values of that type in the debug evaluation table.
+# Format:  name: "element { css-properties }"
+# The element is almost always "span".  Any valid CSS property is accepted.
+
+entity_styles:
+  # process:              "span {color: blue;}"
+  # material:             "span {color: green;}"
+  characteristic:         "span {color: purple;}"     # default: tan
+  # characteristic_value: "span {color: saddlebrown;}"
+  # information:          "span {color: dimgray;}"
+  # error:                "span {color: red;}"         # unbound variables
+
+# ---------------------------------------------------------------------------
+# predicate_styles
+# ---------------------------------------------------------------------------
+# Maps a predicate label (or CURIE such as swrlb:add) to an ordered list of
+# entity-type names, one per argument position.  The last entry in the list is
+# repeated for any arguments beyond the list length.
+# Format:  "predicate label": [type1, type2, ...]
+
+predicate_styles:
+  # "has specified input":      [process, material]
+  # "has specified output":     [process, material]
+  # "has characteristic":       [material, characteristic]
+  # "has characteristic value": [characteristic, characteristic_value]
+  # "has quantity":             [characteristic_value, information]
+  # "mass in kilograms":        [characteristic_value]
+  # "combining two materials":  [process]
+  # "swrlb:add":                [information]
+  # "temperature":              [characteristic]
+  # "characteristic value of":  [characteristic_value, characteristic]

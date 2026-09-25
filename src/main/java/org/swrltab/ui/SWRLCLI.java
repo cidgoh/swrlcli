@@ -1498,6 +1498,9 @@ public class SWRLCLI {
         key = trimmed.substring(0, colon).trim();
         value = trimmed.substring(colon + 1).trim();
       }
+      // Strip inline comment: anything after the closing " or ] and a # character
+      // e.g. "span {color: red;}"  # my comment  →  "span {color: red;}"
+      value = value.replaceFirst("([\"\\]])\\s*#.*$", "$1").trim();
       if ("entity_styles".equals(section)) {
         EntityStyleDef def = parseEntityStyleDef(value);
         if (def != null) c.entityStyles.put(key, def);
