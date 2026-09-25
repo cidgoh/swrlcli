@@ -680,7 +680,7 @@ public class SWRLCLI {
         PathResult best = searchPaths(bodyAtoms, 0,
             new LinkedHashMap<>(), new LinkedHashMap<>(), ontology, df);
         evaluateRuleBody(rule, ontology, best.indBindings, labels,
-            Collections.emptySet(), inverseMap, format, noColor, config);
+            Collections.emptySet(), inverseMap, format, noColor, config, Collections.emptyList());
         reportUndeclaredTerms(rule, ontology);
       }
       return;
@@ -782,7 +782,7 @@ public class SWRLCLI {
             : resolveConstraintBindings(constraints, rule, mergedPrefixes, labels, matchedAtoms, warnMissing);
         List<SWRLAtom> bodyAtoms = new ArrayList<>(rule.getBody());
         PathResult best = searchPaths(bodyAtoms, 0, constraintBindings, new LinkedHashMap<>(), ontology, df);
-        evaluateRuleBody(rule, ontology, best.indBindings, labels, matchedAtoms, inverseMap, format, noColor, config);
+        evaluateRuleBody(rule, ontology, best.indBindings, labels, matchedAtoms, inverseMap, format, noColor, config, constraints);
         reportUndeclaredTerms(rule, ontology);
       }
       return;
@@ -1770,7 +1770,7 @@ public class SWRLCLI {
   private static void evaluateRuleBody(SWRLAPIRule rule, OWLOntology ontology,
       Map<IRI, IRI> initialIndBindings, Map<IRI, String> labels,
       Set<SWRLAtom> matchedAtoms, Map<IRI, Set<IRI>> inverseMap, String format, boolean noColor,
-      SwrltabConfig config) {
+      SwrltabConfig config, List<String> rawConstraints) {
     OWLDataFactory df = ontology.getOWLOntologyManager().getOWLDataFactory();
     List<SWRLAtom> body = new ArrayList<>(rule.getBody());
     Map<IRI, IRI>        indBindings = new LinkedHashMap<>(initialIndBindings);
@@ -1793,9 +1793,13 @@ public class SWRLCLI {
       System.out.println();
       System.out.println(mdRow(Arrays.asList("row", "status", "predicate", "variables", "match", "notes")));
       System.out.println(mdSep(6));
+      for (String c : rawConstraints)
+        System.out.println(mdRow(Arrays.asList("", "*constraint*", c, "", "", "")));
     } else {
       System.out.println("# Rule: " + rule.getRuleName());
       System.out.println("  row\tstatus\tpredicate\tvariables\tmatch\tnotes");
+      for (String c : rawConstraints)
+        System.out.printf("   \tconstraint\t%s%n", c);
     }
 
     // --- Indent levels: atom i is indented one level deeper than the latest preceding
