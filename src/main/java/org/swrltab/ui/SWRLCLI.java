@@ -2541,7 +2541,17 @@ public class SWRLCLI {
   /**
    * If {@code arg} is a SWRL variable and {@code argTokens[argIdx]} resolves to an IRI,
    * records the binding in {@code bindings} and prints it on stderr.
-   * Falls back to rdfs:label lookup when CURIE resolution yields nothing.
+   *
+   * <p>Resolution order:
+   * <ol>
+   *   <li>Explicit CURIE ({@code prefix:local}) or bracketed IRI ({@code <...>}) via
+   *       {@link #resolveIRI} — only attempted when the token contains {@code :} or {@code <>}.</li>
+   *   <li>rdfs:label lookup via {@link #resolveLabel} (case-insensitive).</li>
+   *   <li>Default-namespace bare-name fallback via {@link #resolveIRI}.</li>
+   * </ol>
+   * Trying label lookup before the default-namespace fallback prevents tokens like
+   * {@code "r1.s1.baby carrots mass value"} (spaces) from being silently resolved to a
+   * non-existent fake IRI instead of the correctly labelled individual.
    */
   private static void bindConstraintVariable(SWRLArgument arg, String[] argTokens, int argIdx,
       Map<String, String> prefixes, Map<IRI, String> labels, Map<IRI, IRI> bindings) {
@@ -2549,8 +2559,14 @@ public class SWRLCLI {
     if (argIdx >= argTokens.length) return;
     IRI varIRI = ((SWRLVariable) arg).getIRI();
     String token = argTokens[argIdx].trim();
-    IRI indIRI = resolveIRI(token, prefixes);
+    IRI indIRI = null;
+    // Step 1: explicit CURIE or bracketed IRI only
+    if (token.startsWith("<") || token.contains(":"))
+      indIRI = resolveIRI(token, prefixes);
+    // Step 2: rdfs:label lookup
     if (indIRI == null) indIRI = resolveLabel(token, labels);
+    // Step 3: default-namespace bare-name fallback
+    if (indIRI == null) indIRI = resolveIRI(token, prefixes);
     if (indIRI == null) {
       System.err.println("# ERROR: cannot resolve argument '" + token
           + "' — check prefix declarations or rdfs:label");
