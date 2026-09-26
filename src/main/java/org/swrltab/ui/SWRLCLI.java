@@ -4,6 +4,15 @@ import org.semanticweb.owlapi.apibinding.OWLManager;
 import org.semanticweb.owlapi.formats.FunctionalSyntaxDocumentFormat;
 import org.semanticweb.owlapi.io.FileDocumentSource;
 import org.semanticweb.owlapi.model.*;
+import org.semanticweb.owlapi.reasoner.InferenceType;
+import org.semanticweb.owlapi.reasoner.OWLReasoner;
+import org.semanticweb.owlapi.reasoner.OWLReasonerFactory;
+import org.semanticweb.owlapi.util.InferredAxiomGenerator;
+import org.semanticweb.owlapi.util.InferredClassAssertionAxiomGenerator;
+import org.semanticweb.owlapi.util.InferredEquivalentClassAxiomGenerator;
+import org.semanticweb.owlapi.util.InferredOntologyGenerator;
+import org.semanticweb.owlapi.util.InferredPropertyAssertionGenerator;
+import org.semanticweb.owlapi.util.InferredSubClassAxiomGenerator;
 import org.semanticweb.owlapi.util.SimpleIRIMapper;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -63,7 +72,7 @@ public class SWRLCLI {
     String ruleText = null;
     String ruleTextName = "cli-rule";
     List<String> ruleFiles = new ArrayList<>();
-    boolean infer = false;
+    List<String[]> pipeline = new ArrayList<>();
     boolean listQueries = false;
     boolean listRules = false;
     boolean ignoreImports = false;
@@ -92,8 +101,21 @@ public class SWRLCLI {
           if (++i >= args.length) usage("--query-name requires a name");
           queryTextName = args[i];
           break;
-        case "--infer":
-          infer = true;
+        case "--run":
+          pipeline.add(new String[]{"run"});
+          break;
+        case "--reason": {
+          // Optional argument: hermit (default) or elk
+          String rName = "hermit";
+          if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
+            String v = args[i + 1].toLowerCase();
+            if (v.equals("hermit") || v.equals("elk")) { rName = v; i++; }
+          }
+          pipeline.add(new String[]{"reason", rName});
+          break;
+        }
+        case "--inverse":
+          pipeline.add(new String[]{"inverse"});
           break;
         case "--list-queries":
           listQueries = true;
@@ -164,7 +186,9 @@ public class SWRLCLI {
       i++;
     }
 
-    int modes = (infer ? 1 : 0) + (queryName != null ? 1 : 0) + (queryText != null ? 1 : 0)
+    // Pipeline ops (--inverse, --reason, --run) may repeat in any order.
+    // "modes" counts only the single-use non-pipeline modes.
+    int modes = (queryName != null ? 1 : 0) + (queryText != null ? 1 : 0)
         + (listQueries ? 1 : 0) + (listRules ? 1 : 0)
         + (!ruleNames.isEmpty() && !delete ? 1 : 0)
         + (delete ? 1 : 0)
@@ -182,15 +206,15 @@ public class SWRLCLI {
     }
 
     if (ontologyPath == null) usage("An ontology file path is required");
-    if (modes == 0)
-      usage("Specify one of: --query, --query-text, --infer, --rules, --rule-text, --list-queries, --list-rules, --delete");
-    if (modes > 1) usage("Only one mode may be used at a time");
+    if (modes == 0 && pipeline.isEmpty())
+      usage("Specify one of: --inverse, --reason, --run, --query, --query-text, --rules, --rule-text, --list-queries, --list-rules, --delete");
+    if (modes > 1) usage("Only one inference/query mode may be used at a time");
     if (delete && ruleNames.isEmpty()) usage("--delete requires --rules <name[,name…]>");
     if (delete && !save) System.err.println("Warning: --delete without --save removes rules in memory only; changes will not be persisted");
 
-    boolean inferenceMode = infer || (!ruleNames.isEmpty() && !delete) || ruleText != null;
+    boolean inferenceMode = !pipeline.isEmpty() || (!ruleNames.isEmpty() && !delete) || ruleText != null;
     if (outputFilePath != null && !inferenceMode)
-      System.err.println("Warning: --output-file only applies to --infer, --rules, or --rule-text; ignoring");
+      System.err.println("Warning: --output-file only applies to --reason, --run, --rules, or --rule-text; ignoring");
     if (outputIri != null && outputFilePath == null)
       System.err.println("Warning: --output-iri has no effect without --output-file");
     File outputFile = (outputFilePath != null && inferenceMode) ? new File(outputFilePath) : null;
@@ -228,10 +252,37 @@ public class SWRLCLI {
       for (String fp : ruleFiles) loadSwrlFile(ontology, fp, resolvedLabels, resolvedBare);
       if (format.equals("markdown"))
         System.out.println("<style>\nbody, .markdown-body { max-width: 90%; }\n" + generateEntityCSS(config) + "\n</style>\n");
-      if (infer) {
-        runInference(manager, ontology, ontologyName, catalogNote, format, debug, noColor, config,
-            outputFile, outputIri, resolvedLabels, resolvedBare);
-      } else if (!ruleNames.isEmpty() && !delete) {
+
+      // Execute pipeline steps (--inverse, --reason, --run) in the order given on the command line.
+      // All but the last step run in augment mode (silently add axioms to the in-memory ontology).
+      // The last step (when no non-pipeline mode follows) outputs normally.
+      boolean hasNonPipelineMode = modes > 0;
+      for (int pi = 0; pi < pipeline.size(); pi++) {
+        String[] step = pipeline.get(pi);
+        boolean isLast = (pi == pipeline.size() - 1) && !hasNonPipelineMode;
+        boolean augment = !isLast;
+        switch (step[0]) {
+          case "inverse":
+            runInverse(manager, ontology, ontologyName, catalogNote,
+                augment, augment ? null : outputFile, augment ? null : outputIri, format);
+            break;
+          case "reason":
+            runReasoner(manager, ontology, step[1], ontologyName, catalogNote,
+                augment, augment ? null : outputFile, augment ? null : outputIri, format);
+            break;
+          case "run":
+            if (augment) {
+              runInferenceAugment(manager, ontology, ontologyName);
+            } else {
+              runInference(manager, ontology, ontologyName, catalogNote, format, debug, noColor,
+                  config, outputFile, outputIri, resolvedLabels, resolvedBare);
+            }
+            break;
+        }
+      }
+
+      if (hasNonPipelineMode) {
+      if (!ruleNames.isEmpty() && !delete) {
         runRules(manager, ontology, ruleNames, debug, constraints, format, ontologyName, catalogNote,
             noColor, config, outputFile, outputIri, resolvedLabels, resolvedBare);
       } else if (ruleText != null) {
@@ -264,6 +315,7 @@ public class SWRLCLI {
         String name = (queryText != null) ? queryTextName : queryName;
         runQuery(ontology, name, queryText, format, debug, constraints, ontologyName, catalogNote);
       }
+      } // end if (hasNonPipelineMode)
       if (save) {
         if (ruleFiles.isEmpty() && !delete) {
           System.err.println("Warning: --save has no effect without --file or --delete");
@@ -641,6 +693,214 @@ public class SWRLCLI {
    * in OWL Functional Syntax format. Prefix declarations are copied from the
    * source ontology so that IRIs appear in prefixed (short) form where possible.
    */
+
+  // ---------------------------------------------------------------------------
+  // OWL Reasoner (--reason)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Runs an OWL reasoner ({@code hermit} or {@code elk}) against the loaded ontology.
+   *
+   * <p>When {@code addToOntology} is {@code true} the inferred axioms are merged back into
+   * {@code ontology} so that a subsequent {@code --run} or {@code --rules} pass can see them.
+   * When {@code false} (standalone mode) they are written to {@code outputFile} or stdout.
+   */
+  private static void runReasoner(OWLOntologyManager manager, OWLOntology ontology,
+      String reasonerName, String ontologyName, String catalogNote,
+      boolean addToOntology, File outputFile, String outputIri, String format)
+      throws OWLOntologyCreationException, OWLOntologyStorageException, IOException {
+
+    String displayName = reasonerName.equals("elk") ? "ELK" : "HermiT";
+    System.err.println("Running " + displayName + " OWL reasoner on " + ontologyName + " ...");
+
+    OWLReasonerFactory factory = reasonerName.equals("elk")
+        ? new org.semanticweb.elk.owlapi.ElkReasonerFactory()
+        : new org.semanticweb.HermiT.ReasonerFactory();
+
+    // HermiT (and most OWL reasoners) do not support SWRL built-in atoms (e.g. swrlb:add).
+    // Build a reasoning-only flat copy of the import closure with all SWRL rules removed.
+    // Use bulk addAxioms + targeted removeAxioms(SWRL_RULE) to leverage OWLAPI's axiom-type
+    // index rather than iterating and instanceof-checking every axiom individually.
+    OWLOntology reasoningOnt = manager.createOntology();
+    for (OWLOntology ont : ontology.getImportsClosure()) {
+      manager.addAxioms(reasoningOnt, ont.getAxioms());
+      manager.removeAxioms(reasoningOnt, ont.getAxioms(AxiomType.SWRL_RULE));
+    }
+
+    OWLReasoner reasoner = factory.createReasoner(reasoningOnt);
+
+    // ELK supports class hierarchy and class assertions only;
+    // HermiT supports the full ABox including property assertions.
+    if (reasonerName.equals("elk")) {
+      reasoner.precomputeInferences(
+          InferenceType.CLASS_HIERARCHY,
+          InferenceType.CLASS_ASSERTIONS);
+    } else {
+      reasoner.precomputeInferences(
+          InferenceType.CLASS_HIERARCHY,
+          InferenceType.CLASS_ASSERTIONS,
+          InferenceType.OBJECT_PROPERTY_ASSERTIONS,
+          InferenceType.DATA_PROPERTY_ASSERTIONS);
+    }
+
+    List<InferredAxiomGenerator<? extends OWLAxiom>> generators = new ArrayList<>();
+    generators.add(new InferredSubClassAxiomGenerator());
+    generators.add(new InferredEquivalentClassAxiomGenerator());
+    generators.add(new InferredClassAssertionAxiomGenerator());
+    if (!reasonerName.equals("elk")) {
+      generators.add(new InferredPropertyAssertionGenerator());
+    }
+
+    InferredOntologyGenerator iog = new InferredOntologyGenerator(reasoner, generators);
+    OWLOntology inferredOnt = manager.createOntology();
+    iog.fillOntology(manager.getOWLDataFactory(), inferredOnt);
+    Set<OWLAxiom> inferred = inferredOnt.getAxioms();
+
+    System.err.println(displayName + ": " + inferred.size()
+        + " axiom(s) inferred — " + ontologyName);
+
+    reasoner.dispose();
+
+    if (addToOntology) {
+      manager.addAxioms(ontology, inferred);
+      return;
+    }
+
+    // Standalone or explicit --output-file: write axioms
+    FunctionalSyntaxDocumentFormat fmt = new FunctionalSyntaxDocumentFormat();
+    OWLDocumentFormat src = manager.getOntologyFormat(ontology);
+    if (src != null && src.isPrefixOWLOntologyFormat())
+      fmt.copyPrefixesFrom(src.asPrefixOWLOntologyFormat());
+
+    OWLOntology output = (outputIri != null)
+        ? manager.createOntology(IRI.create(outputIri))
+        : manager.createOntology();
+    manager.addAxioms(output, inferred);
+
+    if (outputFile != null) {
+      try (OutputStream os = Files.newOutputStream(outputFile.toPath())) {
+        manager.saveOntology(output, fmt, os);
+      }
+      System.err.println("Wrote " + inferred.size() + " inferred axiom(s) to " + outputFile.getPath());
+    } else {
+      manager.saveOntology(output, fmt, System.out);
+    }
+  }
+
+  /**
+   * Materialises inverse object-property assertions by reading every
+   * {@code InverseObjectProperties} axiom in the import closure and, for each
+   * existing {@code ObjectPropertyAssertion(p, a, b)}, adding
+   * {@code ObjectPropertyAssertion(p⁻¹, b, a)} when that assertion is not already
+   * present.
+   *
+   * <p>When {@code addToOntology} is {@code true} (pipeline augment mode) the new
+   * assertions are added to {@code ontology} and the method returns silently.
+   * When {@code false} (standalone or explicit {@code --output-file}) the new
+   * assertions are serialised in OWL Functional Syntax to {@code outputFile} or
+   * stdout.
+   */
+  private static void runInverse(OWLOntologyManager manager, OWLOntology ontology,
+      String ontologyName, String catalogNote,
+      boolean addToOntology, File outputFile, String outputIri, String format)
+      throws OWLOntologyCreationException, OWLOntologyStorageException, IOException {
+
+    System.err.println("Materialising inverse property assertions for " + ontologyName + " ...");
+
+    Map<IRI, Set<IRI>> inverseMap = buildInversePropertyMap(ontology);
+    if (inverseMap.isEmpty()) {
+      System.err.println("--inverse: no InverseObjectProperties axioms found in " + ontologyName);
+      return;
+    }
+
+    OWLDataFactory df = manager.getOWLDataFactory();
+    Set<OWLAxiom> toAdd = new HashSet<>();
+
+    // Snapshot every existing property assertion to avoid asserting duplicates.
+    Set<String> existing = new HashSet<>();
+    for (OWLOntology ont : ontology.getImportsClosure()) {
+      for (OWLObjectPropertyAssertionAxiom ax :
+          ont.getAxioms(AxiomType.OBJECT_PROPERTY_ASSERTION)) {
+        if (!(ax.getProperty() instanceof OWLObjectProperty)) continue;
+        if (!(ax.getSubject() instanceof OWLNamedIndividual)) continue;
+        if (!(ax.getObject() instanceof OWLNamedIndividual)) continue;
+        IRI pred = ((OWLObjectProperty) ax.getProperty()).getIRI();
+        IRI subj = ((OWLNamedIndividual) ax.getSubject()).getIRI();
+        IRI obj  = ((OWLNamedIndividual) ax.getObject()).getIRI();
+        existing.add(pred + "|" + subj + "|" + obj);
+      }
+    }
+
+    // For each assertion pred(subj,obj), assert inv(obj,subj) when not already present.
+    for (OWLOntology ont : ontology.getImportsClosure()) {
+      for (OWLObjectPropertyAssertionAxiom ax :
+          ont.getAxioms(AxiomType.OBJECT_PROPERTY_ASSERTION)) {
+        if (!(ax.getProperty() instanceof OWLObjectProperty)) continue;
+        if (!(ax.getSubject() instanceof OWLNamedIndividual)) continue;
+        if (!(ax.getObject() instanceof OWLNamedIndividual)) continue;
+        IRI pred = ((OWLObjectProperty) ax.getProperty()).getIRI();
+        IRI subj = ((OWLNamedIndividual) ax.getSubject()).getIRI();
+        IRI obj  = ((OWLNamedIndividual) ax.getObject()).getIRI();
+        Set<IRI> invs = inverseMap.get(pred);
+        if (invs == null) continue;
+        for (IRI invPred : invs) {
+          String key = invPred + "|" + obj + "|" + subj;
+          if (!existing.contains(key)) {
+            toAdd.add(df.getOWLObjectPropertyAssertionAxiom(
+                df.getOWLObjectProperty(invPred),
+                df.getOWLNamedIndividual(obj),
+                df.getOWLNamedIndividual(subj)));
+            existing.add(key); // prevent duplicate if multiple source assertions produce the same inverse
+          }
+        }
+      }
+    }
+
+    System.err.println("--inverse: " + toAdd.size()
+        + " inverse assertion(s) materialised — " + ontologyName);
+
+    if (addToOntology) {
+      manager.addAxioms(ontology, toAdd);
+      return;
+    }
+
+    // Standalone or --output-file: serialise the new axioms.
+    FunctionalSyntaxDocumentFormat fmt = new FunctionalSyntaxDocumentFormat();
+    OWLDocumentFormat src = manager.getOntologyFormat(ontology);
+    if (src != null && src.isPrefixOWLOntologyFormat())
+      fmt.copyPrefixesFrom(src.asPrefixOWLOntologyFormat());
+
+    OWLOntology output = (outputIri != null)
+        ? manager.createOntology(IRI.create(outputIri))
+        : manager.createOntology();
+    manager.addAxioms(output, toAdd);
+
+    if (outputFile != null) {
+      try (OutputStream os = Files.newOutputStream(outputFile.toPath())) {
+        manager.saveOntology(output, fmt, os);
+      }
+      System.err.println("Wrote " + toAdd.size() + " inverse axiom(s) to " + outputFile.getPath());
+    } else {
+      manager.saveOntology(output, fmt, System.out);
+    }
+  }
+
+  /**
+   * Pipeline-augment variant of {@link #runInference}: fires all enabled SWRL rules
+   * and adds the inferred axioms back into {@code ontology} so that subsequent
+   * pipeline steps see them as asserted facts.  No output is written.
+   */
+  private static void runInferenceAugment(OWLOntologyManager manager, OWLOntology ontology,
+      String ontologyName) throws SWRLAPIException {
+    System.err.println("--run (augment): firing SWRL rules on " + ontologyName + " ...");
+    SWRLRuleEngine engine = SWRLAPIFactory.createSWRLRuleEngine(ontology);
+    engine.infer();
+    Set<OWLAxiom> inferred = engine.getInferredOWLAxioms();
+    manager.addAxioms(ontology, inferred);
+    System.err.println("--run (augment): " + inferred.size()
+        + " axiom(s) added — " + ontologyName);
+  }
+
   private static void runInference(OWLOntologyManager manager, OWLOntology ontology,
       String ontologyName, String catalogNote, String format, boolean debug, boolean noColor,
       SwrltabConfig config, File outputFile, String outputIri,
@@ -680,7 +940,7 @@ public class SWRLCLI {
         PathResult best = searchPaths(bodyAtoms, 0,
             new LinkedHashMap<>(), new LinkedHashMap<>(), ontology, df);
         evaluateRuleBody(rule, ontology, best.indBindings, labels,
-            Collections.emptySet(), inverseMap, format, noColor, config, Collections.emptyList());
+            Collections.emptyMap(), Collections.emptyList(), inverseMap, format, noColor, config);
         reportUndeclaredTerms(rule, ontology);
       }
       return;
@@ -776,13 +1036,14 @@ public class SWRLCLI {
       for (SWRLAPIRule rule : orderedRules) {
         if (!first) System.out.println(md ? "\n---\n" : "");
         first = false;
-        Set<SWRLAtom> matchedAtoms = new HashSet<>();
+        Map<SWRLAtom, String> constraintMap = new LinkedHashMap<>();
+        List<String> constraintErrors = new ArrayList<>();
         Map<IRI, IRI> constraintBindings = constraints.isEmpty()
             ? new LinkedHashMap<>()
-            : resolveConstraintBindings(constraints, rule, mergedPrefixes, labels, matchedAtoms, warnMissing);
+            : resolveConstraintBindings(constraints, rule, mergedPrefixes, labels, constraintMap, constraintErrors, warnMissing);
         List<SWRLAtom> bodyAtoms = new ArrayList<>(rule.getBody());
         PathResult best = searchPaths(bodyAtoms, 0, constraintBindings, new LinkedHashMap<>(), ontology, df);
-        evaluateRuleBody(rule, ontology, best.indBindings, labels, matchedAtoms, inverseMap, format, noColor, config, constraints);
+        evaluateRuleBody(rule, ontology, best.indBindings, labels, constraintMap, constraintErrors, inverseMap, format, noColor, config);
         reportUndeclaredTerms(rule, ontology);
       }
       return;
@@ -1310,7 +1571,33 @@ public class SWRLCLI {
       IRI subjIRI = resolveIArg(pa.getFirstArgument(), indBindings);
       IRI objIRI  = resolveIArg(pa.getSecondArgument(), indBindings);
 
-      if (subjIRI == null) return null; // subject unbound: delegate
+      if (subjIRI == null && objIRI == null) {
+        // Both unbound: enumerate all assertions for this predicate (e.g. a bridging rule
+        // whose first atom is a bare two-place property with no prior class-atom anchor).
+        IRI subjVar = (pa.getFirstArgument()  instanceof SWRLVariable)
+            ? ((SWRLVariable) pa.getFirstArgument()).getIRI()  : null;
+        IRI objVar  = (pa.getSecondArgument() instanceof SWRLVariable)
+            ? ((SWRLVariable) pa.getSecondArgument()).getIRI() : null;
+        Set<String> seen = new HashSet<>();
+        List<Map<IRI, IRI>> result = new ArrayList<>();
+        for (OWLOntology ont : ontology.getImportsClosure())
+          for (OWLObjectPropertyAssertionAxiom ax : ont.getAxioms(AxiomType.OBJECT_PROPERTY_ASSERTION))
+            if (ax.getProperty().equals(pe)
+                && ax.getSubject() instanceof OWLNamedIndividual
+                && ax.getObject()  instanceof OWLNamedIndividual) {
+              IRI s = ((OWLNamedIndividual) ax.getSubject()).getIRI();
+              IRI o = ((OWLNamedIndividual) ax.getObject()).getIRI();
+              if (seen.add(s + "|" + o)) {
+                Map<IRI, IRI> m = new LinkedHashMap<>();
+                if (subjVar != null) m.put(subjVar, s);
+                if (objVar  != null) m.put(objVar,  o);
+                result.add(m);
+              }
+            }
+        return result;
+      }
+
+      if (subjIRI == null) return null; // subject unbound, object bound: delegate to evaluateAtom
 
       OWLNamedIndividual subj = df.getOWLNamedIndividual(subjIRI);
       if (objIRI != null) {
@@ -1706,7 +1993,7 @@ public class SWRLCLI {
       List<String> styles = colorize ? config.predicateStyles.get(predName) : null;
       String a0 = fmtIArg(ca.getArgument(), indBindings, labels);
       if (colorize) a0 = colorizeArgValue(a0, styles != null && !styles.isEmpty() ? predStyle(styles, 0) : null, config);
-      return predName + "\t(" + a0 + ")";
+      return predName + "\t" + a0;
     }
     if (atom instanceof SWRLObjectPropertyAtom) {
       SWRLObjectPropertyAtom pa = (SWRLObjectPropertyAtom) atom;
@@ -1720,7 +2007,7 @@ public class SWRLCLI {
         a0 = colorizeArgValue(a0, styles != null && !styles.isEmpty() ? predStyle(styles, 0) : null, config);
         a1 = colorizeArgValue(a1, styles != null && !styles.isEmpty() ? predStyle(styles, 1) : null, config);
       }
-      return predName + "\t(" + a0 + ", " + a1 + ")";
+      return predName + "\t" + a0 + ", " + a1;
     }
     if (atom instanceof SWRLDataPropertyAtom) {
       SWRLDataPropertyAtom da = (SWRLDataPropertyAtom) atom;
@@ -1734,7 +2021,7 @@ public class SWRLCLI {
         a0 = colorizeArgValue(a0, styles != null && !styles.isEmpty() ? predStyle(styles, 0) : null, config);
         a1 = colorizeArgValue(a1, styles != null && !styles.isEmpty() ? predStyle(styles, 1) : null, config);
       }
-      return predName + "\t(" + a0 + ", " + a1 + ")";
+      return predName + "\t" + a0 + ", " + a1;
     }
     if (atom instanceof SWRLBuiltInAtom) {
       SWRLBuiltInAtom ba = (SWRLBuiltInAtom) atom;
@@ -1748,7 +2035,7 @@ public class SWRLCLI {
         if (colorize) val = colorizeArgValue(val, styles != null && !styles.isEmpty() ? predStyle(styles, j) : null, config);
         parts.add(val);
       }
-      return predName + "\t(" + String.join(", ", parts) + ")";
+      return predName + "\t" + String.join(", ", parts);
     }
     if (atom instanceof SWRLDifferentIndividualsAtom) {
       SWRLDifferentIndividualsAtom dia = (SWRLDifferentIndividualsAtom) atom;
@@ -1760,7 +2047,7 @@ public class SWRLCLI {
         a0 = colorizeArgValue(a0, styles != null && !styles.isEmpty() ? predStyle(styles, 0) : null, config);
         a1 = colorizeArgValue(a1, styles != null && !styles.isEmpty() ? predStyle(styles, 1) : null, config);
       }
-      return predName + "\t(" + a0 + ", " + a1 + ")";
+      return predName + "\t" + a0 + ", " + a1;
     }
     return atom.getClass().getSimpleName();
   }
@@ -1769,8 +2056,9 @@ public class SWRLCLI {
 
   private static void evaluateRuleBody(SWRLAPIRule rule, OWLOntology ontology,
       Map<IRI, IRI> initialIndBindings, Map<IRI, String> labels,
-      Set<SWRLAtom> matchedAtoms, Map<IRI, Set<IRI>> inverseMap, String format, boolean noColor,
-      SwrltabConfig config, List<String> rawConstraints) {
+      Map<SWRLAtom, String> constraintMap, List<String> constraintErrors,
+      Map<IRI, Set<IRI>> inverseMap, String format, boolean noColor,
+      SwrltabConfig config) {
     OWLDataFactory df = ontology.getOWLOntologyManager().getOWLDataFactory();
     List<SWRLAtom> body = new ArrayList<>(rule.getBody());
     Map<IRI, IRI>        indBindings = new LinkedHashMap<>(initialIndBindings);
@@ -1793,13 +2081,21 @@ public class SWRLCLI {
       System.out.println();
       System.out.println(mdRow(Arrays.asList("row", "status", "predicate", "variables", "match", "notes")));
       System.out.println(mdSep(6));
-      for (String c : rawConstraints)
-        System.out.println(mdRow(Arrays.asList("", "*constraint*", c, "", "", "")));
     } else {
       System.out.println("# Rule: " + rule.getRuleName());
       System.out.println("  row\tstatus\tpredicate\tvariables\tmatch\tnotes");
-      for (String c : rawConstraints)
-        System.out.printf("   \tconstraint\t%s%n", c);
+    }
+
+    // --- Constraint error rows (unmatched --constraint predicates) ---
+    for (String err : constraintErrors) {
+      if (md) {
+        System.out.println(mdRow(Arrays.asList("",
+            "<span style=\"color:red\">ERROR</span>",
+            "", "", "",
+            "<span style=\"color:red\">" + err + "</span>")));
+      } else {
+        System.out.printf("   \t[ERROR]\t\t\t\t%s%n", err);
+      }
     }
 
     // --- Indent levels: atom i is indented one level deeper than the latest preceding
@@ -1839,13 +2135,33 @@ public class SWRLCLI {
         }
       }
 
+      // If this atom was the target of a --constraint, emit a constraint row immediately above it.
+      if (constraintMap.containsKey(atom)) {
+        String raw = constraintMap.get(atom);
+        int paren = raw.indexOf('(');
+        int close = raw.lastIndexOf(')');
+        String cPred = paren > 0 ? raw.substring(0, paren).trim() : raw;
+        String cArgs = (paren >= 0 && close > paren) ? raw.substring(paren + 1, close).trim() : "";
+        // Strip surrounding quotes from predicate label if present
+        if (cPred.length() >= 2
+            && ((cPred.startsWith("'") && cPred.endsWith("'"))
+             || (cPred.startsWith("\"") && cPred.endsWith("\"")))) {
+          cPred = cPred.substring(1, cPred.length() - 1).trim();
+        }
+        if (md) {
+          System.out.println(mdRow(Arrays.asList("", "*constraint*", cPred, "", cArgs, "")));
+        } else {
+          System.out.printf("   \tconstraint\t%s\t\t%s\t%n", cPred, cArgs);
+        }
+      }
+
       // Format atom using post-eval bindings so newly bound values show inline.
       // Per-argument colours come from the predicate styles config when colorize is true.
       String display = formatAtomColored(atom, indBindings, litBindings, labels, colorize, config);
 
       // Compute notes column: MATCHED > reference error (red) > INVERSE ONLY > diagnostic note
       String noteCell;
-      if (matchedAtoms.contains(atom)) {
+      if (constraintMap.containsKey(atom)) {
         noteCell = r.satisfied ? "MATCHED" : (md ? "*" + r.note + "*" : r.note);
       } else if (r.referenceError) {
         noteCell = md
@@ -2459,7 +2775,7 @@ public class SWRLCLI {
    */
   private static Map<IRI, IRI> resolveConstraintBindings(List<String> rawConstraints,
       SWRLAPIRule rule, Map<String, String> prefixes, Map<IRI, String> labels,
-      Set<SWRLAtom> matchedAtoms, boolean warnMissing) {
+      Map<SWRLAtom, String> constraintMap, List<String> constraintErrors, boolean warnMissing) {
 
     Map<IRI, IRI> bindings = new LinkedHashMap<>();
     List<SWRLAtom> bodyAtoms = new ArrayList<>(rule.getBody());
@@ -2516,14 +2832,18 @@ public class SWRLCLI {
         }
       }
       if (matchedAtom == null) {
+        String predLabel = labels.get(predicateIRI);
+        String predDesc  = iriFragment(predicateIRI.toString())
+            + (predLabel != null ? " (" + predLabel + ")" : "");
+        String errMsg = "no body atom with predicate '" + predDesc
+            + "' found in rule '" + rule.getRuleName() + "'";
         if (warnMissing) {
-          System.err.println("# ERROR: no body atom with predicate '"
-              + iriFragment(predicateIRI.toString()) + "' found in rule '"
-              + rule.getRuleName() + "'");
+          System.err.println("# ERROR: " + errMsg);
         }
+        constraintErrors.add(errMsg);
         continue;
       }
-      matchedAtoms.add(matchedAtom);
+      constraintMap.put(matchedAtom, raw);
 
       // Bind the atom's variable argument(s) to the supplied individual IRI(s)
       if (matchedAtom instanceof SWRLClassAtom) {
@@ -2956,8 +3276,14 @@ public class SWRLCLI {
     if (msg != null) System.err.println("Error: " + msg);
     System.err.println("Usage: SWRLCLI [options] <ontology.owl>");
     System.err.println();
-    System.err.println("Run modes (exactly one required):");
-    System.err.println("  --infer                   Fire all enabled SWRL rules; print inferred axioms");
+    System.err.println("Run modes (at least one required; pipeline ops may be combined and repeated in order):");
+    System.err.println("  --inverse                 Materialise inverse property assertions from InverseObjectProperties");
+    System.err.println("                            axioms. Alone: outputs new assertions. Augments ontology when combined.");
+    System.err.println("  --reason [hermit|elk]     Run OWL reasoner (default: hermit). Alone: outputs inferred axioms.");
+    System.err.println("                            Augments ontology when combined with other steps.");
+    System.err.println("                            hermit=full OWL DL; elk=OWL EL profile (class hierarchy only).");
+    System.err.println("  --run                     Fire all SWRL rules via Drools; print inferred axioms.");
+    System.err.println("                            Augments ontology when combined with other steps.");
     System.err.println("  --rules <name[,name…]>    Fire one or more named SWRL rules");
     System.err.println("  --rule-text <swrl>        Parse and fire an inline SWRL rule expression");
     System.err.println("    --rule-text-name <name>   Name for the inline rule (default: cli-rule)");
@@ -2980,7 +3306,7 @@ public class SWRLCLI {
     System.err.println("                            markdown: HTML table with rdfs:label substitution and colour spans");
     System.err.println("                            txt: like markdown but no HTML — paste-safe for --file input");
     System.err.println("  --no-color                Suppress HTML colour spans in markdown output");
-    System.err.println("  --output-file <path>      Write inferred ontology to file (--infer/--rules/--rule-text only)");
+    System.err.println("  --output-file <path>      Write inferred ontology to file (--reason/--run/--rules/--rule-text only)");
     System.err.println("  --output-iri <iri>        Override ontology IRI written to --output-file");
     System.err.println();
     System.err.println("Debug/trace options:");
